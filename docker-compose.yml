@@ -1,0 +1,90 @@
+# Whole demo on one VM: OpenSearch 3.7 (REST + gRPC), Ollama, the Streamlit app, and Caddy (HTTPS + password).
+# Only Caddy is reachable from the internet (ports 80/443). OpenSearch is bound to localhost on the VM.
+# Values come from the .env file next to this file (see README, "Deploy on Google Cloud").
+
+services:
+  opensearch:
+    image: opensearchproject/opensearch:3.7.0
+    container_name: opensearch
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - OPENSEARCH_JAVA_OPTS=-Xms4g -Xmx4g
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_ADMIN_PASSWORD}
+      - aux.transport.types=transport-grpc
+      - aux.transport.transport-grpc.port=9400-9500
+      - grpc.host=0.0.0.0
+      - grpc.publish_port=9400
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    ports:
+      - "127.0.0.1:9200:9200"
+      - "127.0.0.1:9400:9400"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sk -u admin:$${OPENSEARCH_INITIAL_ADMIN_PASSWORD} https://localhost:9200/_cluster/health | grep -q -E '\"status\":\"(green|yellow)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    volumes:
+      - ollama-models:/root/.ollama
+    restart: unless-stopped
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    entrypoint: ["sh", "-c", "sleep 5 && ollama pull nomic-embed-text && ollama pull llama3.2:1b"]
+    depends_on:
+      - ollama
+    restart: "no"
+
+  app:
+    build: ../..
+    container_name: app
+    environment:
+      - OS_PASSWORD=${OPENSEARCH_ADMIN_PASSWORD}
+      - OS_REST=https://opensearch:9200
+      - OS_GRPC=opensearch:9400
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_FROM_OPENSEARCH=ollama:11434
+      - OS_CONFIGURE_ML=true
+    volumes:
+      - app-data:/app/data
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    container_name: caddy
+    environment:
+      - SITE_ADDRESS=${SITE_ADDRESS}
+      - DEMO_USER=${DEMO_USER}
+      - DEMO_PASSWORD_HASH=${DEMO_PASSWORD_HASH}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  opensearch-data:
+  ollama-models:
+  app-data:
+  caddy-data:
